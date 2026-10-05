@@ -8,6 +8,8 @@ HostDeck is a macOS app that checks, wakes and connects to the hosts on a local 
 
 To build and install, run `./build.sh`. To build only, run `./build.sh --no-install`.
 
+`build.sh` signs with the "HostDeck Local Signing" certificate from `Tools/make-signing-cert.sh` if it is in the keychain. Keep it that way. An ad hoc signature changes with each build, and macOS then drops the Local Network permission, so every port check fails. The README section "Signing" gives the details.
+
 ## The file format
 
 `docs/FILE-FORMAT.md` defines the JSON of the saved hosts and of File > Export Hosts. It is a contract between platforms.

@@ -22,7 +22,15 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
 
-codesign --force --sign - "$APP"
+# Sign with the stable certificate if it is in the keychain, so that macOS keeps the Local Network
+# permission across rebuilds. Tools/make-signing-cert.sh makes the certificate. Without it, sign ad hoc.
+SIGN_ID="${HOSTDECK_SIGN_ID:-HostDeck Local Signing}"
+if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+    codesign --force --sign "$SIGN_ID" "$APP"
+else
+    codesign --force --sign - "$APP"
+    echo "Signed ad hoc. macOS can ask again for Local Network permission. To stop this, run Tools/make-signing-cert.sh."
+fi
 
 if [[ "${1:-}" != "--no-install" ]]; then
     rm -rf ~/Applications/HostDeck.app

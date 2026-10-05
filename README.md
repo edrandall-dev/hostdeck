@@ -19,15 +19,23 @@ On the first start, HostDeck copies the hosts and settings of the old Wake app.
    cd hostdeck
    ```
 
-2. Build and install the app:
+2. Make a signing certificate. Do this one time on each Mac:
+
+   ```sh
+   Tools/make-signing-cert.sh
+   ```
+
+   The script adds a self-signed code signing certificate, "HostDeck Local Signing", to your login keychain. It is valid for 10 years. This step is optional, but without it macOS can drop the Local Network permission after each rebuild. See [Signing](#signing).
+
+3. Build and install the app:
 
    ```sh
    ./build.sh
    ```
 
-   The script compiles the app, makes the icon, signs the app ad hoc and copies it to `~/Applications/HostDeck.app`. To build without the install step, run `./build.sh --no-install`. The app is then in `build/HostDeck.app`.
+   The script compiles the app, makes the icon, signs the app and copies it to `~/Applications/HostDeck.app`. The first time it signs with the certificate, macOS asks to let `codesign` use the key. Click **Always Allow**. To build without the install step, run `./build.sh --no-install`. The app is then in `build/HostDeck.app`.
 
-3. Open HostDeck from `~/Applications` or from Spotlight.
+4. Open HostDeck from `~/Applications` or from Spotlight.
 
 To update the app, pull the latest changes and run `./build.sh` again. Quit HostDeck before you do this. Your hosts and settings stay.
 
@@ -140,10 +148,25 @@ To restore hosts, or to copy them to another Mac, choose File > Import Hosts….
 
 Import also accepts a bare JSON array of hosts, for example the `hosts` value from `defaults export uk.edrandall.hostdeck`. [docs/FILE-FORMAT.md](docs/FILE-FORMAT.md) defines the file format.
 
+## Signing
+
+macOS gives the Local Network permission to an app by its signature. An ad hoc signature contains a hash of the build, so each rebuild looks like a new app to macOS. The permission then stops working. The symptom is that every port shows as "not answering" while ping still works, or that a wake packet fails with "No route to host".
+
+With the certificate from `Tools/make-signing-cert.sh`, the signature names the bundle ID and the certificate, and it stays the same across rebuilds. You allow Local Network access one time, and the permission stays.
+
+`build.sh` uses the certificate if it is in the keychain, and signs ad hoc if it is not. To use a certificate with another name, set `HOSTDECK_SIGN_ID` for both scripts. To check the signature, run:
+
+```sh
+codesign -d -r- ~/Applications/HostDeck.app
+```
+
+The output must show `certificate leaf`, not `cdhash`. After the first build with the certificate, allow Local Network access once more in System Settings > Privacy & Security > Local Network.
+
+To remove the certificate, delete "HostDeck Local Signing" from the login keychain in Keychain Access.
+
 ## Notes
 
 - The SSH login test uses `StrictHostKeyChecking=accept-new`. On the first login, the test adds the host key to `~/.ssh/known_hosts`. If the host key changes, the test fails.
-- The build signs the app ad hoc. After a rebuild, macOS can ask again for Local Network permission.
 - The app keeps its hosts in its own preferences. It does not read or change the `HOSTS` list of the `wake` command line script.
 - To open HostDeck when you log in, add it in System Settings > General > Login Items.
 
@@ -164,7 +187,8 @@ Import also accepts a bare JSON array of hosts, for example the `hosts` value fr
 | `Sources/HostDeck.swift` | The source of the app. |
 | `Resources/Info.plist` | The bundle information, with the Local Network usage text. |
 | `Tools/make-icon.swift` | Draws the app icon. `build.sh` runs it. |
-| `build.sh` | Builds, signs and installs the app. |
+| `Tools/make-signing-cert.sh` | Makes the signing certificate. Run it one time on each Mac. |
+| `build.sh` | Builds, signs and installs the app. It signs with the certificate if there is one, else ad hoc. |
 | `docs/FILE-FORMAT.md` | The JSON format of the saved hosts and of the export file. |
 | `CLAUDE.md` | Notes for Claude Code, with the plan for a Windows version. |
 | `LICENSE` | The MIT License. |
