@@ -12,8 +12,9 @@ import SwiftUI
 // MARK: - Model
 
 // other: a device that you reach over SSH and that is not a Linux host, for example a router.
+// The raw values are part of the file format (docs/FILE-FORMAT.md). Do not change them.
 enum OSType: String, Codable, CaseIterable, Identifiable {
-    case linux, macos, windows, other
+    case linux = "linux", macos = "macos", windows = "windows", other = "other"
 
     var id: Self { self }
     var label: String {
@@ -64,6 +65,23 @@ struct Host: Identifiable, Codable, Hashable {
         }
     }
     func port(_ s: Service) -> Int { s == .vnc ? vncPort ?? Service.vnc.defaultPort : servicePort }
+    // The keys in the saved hosts and in the export file. docs/FILE-FORMAT.md defines them, and a Windows
+    // version must read the same file. Do not change a raw value: change the format version instead.
+    enum CodingKeys: String, CodingKey {
+        case id = "id"
+        case name = "name"
+        case mac = "mac"
+        case os = "os"
+        case address = "address"
+        case port = "port"
+        case user = "user"
+        case sshKey = "sshKey"
+        case wakeEnabled = "wakeEnabled"
+        case sshEnabled = "sshEnabled"
+        case vncEnabled = "vncEnabled"
+        case vncPort = "vncPort"
+    }
+
     // The service that Wake and Connect opens. Only SSH: HostDeck starts the RDP and Screen Sharing apps,
     // but does not connect them.
     var connectService: Service? { services.contains(.ssh) ? .ssh : nil }
@@ -120,6 +138,36 @@ enum Service: String, Codable, Hashable {
         case .rdp: return "Open RDP App"
         case .vnc: return "Open Screen Sharing"
         }
+    }
+}
+
+// The file that Export Hosts writes and Import Hosts reads. Import also accepts a bare array of hosts,
+// for example the "hosts" value from `defaults export`.
+// docs/FILE-FORMAT.md defines this format. Do not change a key: change the version instead.
+struct HostsFile: Codable {
+    struct Settings: Codable {
+        var broadcast: String?
+        var port: Int?
+        var timeout: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case broadcast = "broadcast"
+            case port = "port"
+            case timeout = "timeout"
+        }
+    }
+    var app = "HostDeck"
+    var version = 1
+    var exported = Date()
+    var hosts: [Host]
+    var settings: Settings?
+
+    enum CodingKeys: String, CodingKey {
+        case app = "app"
+        case version = "version"
+        case exported = "exported"
+        case hosts = "hosts"
+        case settings = "settings"
     }
 }
 
@@ -590,6 +638,80 @@ final class Store: ObservableObject {
         open[id] = nil
     }
 
+    // MARK: Export and import
+
+    func exportHosts() {
+        let panel = NSSavePanel()
+        panel.title = "Export Hosts"
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "HostDeck hosts \(Date().formatted(.iso8601.year().month().day())).json"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let file = HostsFile(hosts: hosts, settings: .init(broadcast: broadcast, port: port, timeout: timeout))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            try encoder.encode(file).write(to: url, options: .atomic)
+            alert("Exported \(hosts.count) hosts", "HostDeck wrote the hosts and settings to \(url.lastPathComponent).")
+        } catch {
+            alert("Cannot export the hosts", error.localizedDescription)
+        }
+    }
+
+    // Merge by host ID: a host with a known ID replaces that host, and other hosts are added.
+    // Import does not delete hosts. Settings in the file replace the current settings.
+    func importHosts() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Hosts"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let file: HostsFile
+        do {
+            let data = try Data(contentsOf: url)
+            if let list = try? decoder.decode([Host].self, from: data) {
+                file = HostsFile(hosts: list)
+            } else {
+                file = try decoder.decode(HostsFile.self, from: data)
+            }
+        } catch {
+            return alert("Cannot import the hosts", "\(url.lastPathComponent) is not a HostDeck export.")
+        }
+
+        var list = hosts
+        var added = 0, replaced = 0
+        for h in file.hosts {
+            if let i = list.firstIndex(where: { $0.id == h.id }) {
+                list[i] = h
+                replaced += 1
+            } else {
+                list.append(h)
+                added += 1
+            }
+        }
+        hosts = list
+        if let s = file.settings {
+            if let v = s.broadcast { broadcast = v }
+            if let v = s.port { port = v }
+            if let v = s.timeout { timeout = v }
+        }
+        Task { await refreshStatus() }
+        alert("Imported \(file.hosts.count) hosts", "\(added) added, \(replaced) replaced.")
+    }
+
+    private func alert(_ title: String, _ text: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        a.runModal()
+    }
+
     func connect(_ host: Host, _ s: Service) {
         switch s {
         case .ssh: openSSH(host)
@@ -719,6 +841,13 @@ struct HostDeckApp: App {
                 .frame(minWidth: 760, minHeight: 520)
         }
         .defaultSize(width: 880, height: 640)
+        .commands {
+            CommandGroup(replacing: .importExport) {
+                Button("Import Hosts…") { store.importHosts() }
+                Button("Export Hosts…") { store.exportHosts() }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+            }
+        }
 
         MenuBarExtra("HostDeck", systemImage: "server.rack") {
             MenuContent().environmentObject(store)

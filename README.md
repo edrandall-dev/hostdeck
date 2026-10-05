@@ -127,6 +127,19 @@ Each status has its own shape, so you can read it without the colour.
 
 The bottom of the host list shows a key for these symbols, the number of hosts that are online, and the time of the last check. The ? button opens the HostDeck page on [edrandall.uk](https://www.edrandall.uk/lab-notes/hostdeck/).
 
+## Back up and move hosts
+
+To back up your hosts, choose File > Export Hosts… (⇧⌘E). HostDeck writes one JSON file with the hosts and the Settings values. The file has no passwords and no keys. It has the paths of the SSH keys, and the MAC and IP addresses.
+
+To restore hosts, or to copy them to another Mac, choose File > Import Hosts…. Import merges the file with the current list:
+
+- A host in the file with the same ID as a host in the list replaces that host.
+- Other hosts in the file are added to the list.
+- Import does not delete hosts.
+- Settings values in the file replace the current Settings.
+
+Import also accepts a bare JSON array of hosts, for example the `hosts` value from `defaults export uk.edrandall.hostdeck`. [docs/FILE-FORMAT.md](docs/FILE-FORMAT.md) defines the file format.
+
 ## Notes
 
 - The SSH login test uses `StrictHostKeyChecking=accept-new`. On the first login, the test adds the host key to `~/.ssh/known_hosts`. If the host key changes, the test fails.
@@ -152,6 +165,8 @@ The bottom of the host list shows a key for these symbols, the number of hosts t
 | `Resources/Info.plist` | The bundle information, with the Local Network usage text. |
 | `Tools/make-icon.swift` | Draws the app icon. `build.sh` runs it. |
 | `build.sh` | Builds, signs and installs the app. |
+| `docs/FILE-FORMAT.md` | The JSON format of the saved hosts and of the export file. |
+| `CLAUDE.md` | Notes for Claude Code, with the plan for a Windows version. |
 | `LICENSE` | The MIT License. |
 
 ## Licence
