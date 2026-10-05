@@ -146,6 +146,8 @@ To restore hosts, or to copy them to another Mac, choose File > Import Hosts….
 - Import does not delete hosts.
 - Settings values in the file replace the current Settings.
 
+Import imports nothing if the file comes from a newer version of HostDeck with a different format, or if an address or user starts with `-`. `ssh` reads such a value as an option, and some options run commands. For the same reason, the app does not test or connect to a host whose address or user starts with `-`.
+
 Import also accepts a bare JSON array of hosts, for example the `hosts` value from `defaults export uk.edrandall.hostdeck`. [docs/FILE-FORMAT.md](docs/FILE-FORMAT.md) defines the file format.
 
 ## Signing
