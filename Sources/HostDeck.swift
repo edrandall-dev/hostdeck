@@ -318,7 +318,7 @@ enum Net {
 
     // Log in with the host's SSH key. BatchMode stops ssh from asking for a password.
     // The test passes when ssh reports "Authenticated to", so it does not depend on a remote command:
-    // RouterOS has no shell. Linux and macOS hosts run "exit 0". Other hosts get no command, and ssh stops on success.
+    // RouterOS has its own command line, not a Unix shell. Linux and macOS hosts run "exit 0". Other hosts get no command, and ssh stops on success.
     static func sshLogin(_ host: Host) async -> (ok: Bool, message: String) {
         var args = ["-v", "-T", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
                     "-o", "IdentitiesOnly=yes", "-i", host.sshKeyPath, "-p", String(host.servicePort), host.sshTarget]

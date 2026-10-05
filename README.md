@@ -114,7 +114,7 @@ The app does the checks in this sequence. If ping fails, the app stops. A macOS 
 3. Service test:
    - Windows: the app sends an RDP connection request and waits for the X.224 Connection Confirm. This shows that an RDP service answers, not only that the port is open.
    - Screen Sharing (macOS): the app opens the port and waits for the server to send its banner. The test passes if the banner starts with `RFB `, for example `RFB 003.889`.
-   - SSH (Linux, macOS and Other): if the host has an SSH key, the app logs in with `ssh` and that key only. The test passes when `ssh` reports that the login succeeded, so it also works on devices with no shell, for example RouterOS. Without a key, the app does not do this step.
+   - SSH (Linux, macOS and Other): if the host has an SSH key, the app logs in with `ssh` and that key only. The test passes when `ssh` reports that the login succeeded, so it also works on devices whose command line is not a Unix shell, for example RouterOS. Without a key, the app does not do this step.
 
 After a wake packet, the app repeats checks 1 and 2 until they pass or the timeout ends. The default timeout is 180 seconds. You can change it in Settings.
 
