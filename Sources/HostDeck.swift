@@ -1,7 +1,7 @@
 // HostDeck: check, wake and connect to the hosts on your network.
 // The app sends Wake-on-LAN packets, then checks each host in stages: ping, then the service port.
 // For a Windows host, the service is RDP. For a Linux or Other host, the service is SSH,
-// and the app tries a real login if an SSH key is set.
+// and the app tries a real login if an SSH key is set. A macOS host has SSH, Screen Sharing, or both.
 
 import AppKit
 import Darwin
@@ -13,12 +13,13 @@ import SwiftUI
 
 // other: a device that you reach over SSH and that is not a Linux host, for example a router.
 enum OSType: String, Codable, CaseIterable, Identifiable {
-    case linux, windows, other
+    case linux, macos, windows, other
 
     var id: Self { self }
     var label: String {
         switch self {
         case .linux: return "Linux"
+        case .macos: return "macOS"
         case .windows: return "Windows"
         case .other: return "Other"
         }
@@ -39,12 +40,33 @@ struct Host: Identifiable, Codable, Hashable {
     var port: Int?
     var user: String = ""
     var sshKey: String = ""
-    // Linux and Other hosts can hide Wake-on-LAN. Windows hosts always have it.
+    // Linux, macOS and Other hosts can hide Wake-on-LAN. Windows hosts always have it.
     var wakeEnabled = true
+    // macOS hosts only. At least one of the two services stays on.
+    var sshEnabled = true
+    var vncEnabled = true
+    // Empty means 5900.
+    var vncPort: Int?
 
     var canWake: Bool { os == .windows || wakeEnabled }
     var macIsValid: Bool { mac.filter(\.isHexDigit).count == 12 }
+    // The SSH port, or the RDP port for a Windows host.
     var servicePort: Int { port ?? os.defaultPort }
+
+    // The services that HostDeck tests, in the order that it tests them.
+    var services: [Service] {
+        switch os {
+        case .windows: return [.rdp]
+        case .linux, .other: return [.ssh]
+        case .macos:
+            let list = (sshEnabled ? [Service.ssh] : []) + (vncEnabled ? [.vnc] : [])
+            return list.isEmpty ? [.ssh] : list
+        }
+    }
+    func port(_ s: Service) -> Int { s == .vnc ? vncPort ?? Service.vnc.defaultPort : servicePort }
+    // The service that Wake and Connect opens. Only SSH: HostDeck starts the RDP and Screen Sharing apps,
+    // but does not connect them.
+    var connectService: Service? { services.contains(.ssh) ? .ssh : nil }
     var sshTarget: String { user.isEmpty ? address : "\(user)@\(address)" }
     var sshKeyPath: String { (sshKey as NSString).expandingTildeInPath }
     var sshKeyMissing: Bool { !sshKey.isEmpty && !FileManager.default.fileExists(atPath: sshKeyPath) }
@@ -66,10 +88,42 @@ extension Host {
         user = try c.decodeIfPresent(String.self, forKey: .user) ?? ""
         sshKey = try c.decodeIfPresent(String.self, forKey: .sshKey) ?? ""
         wakeEnabled = try c.decodeIfPresent(Bool.self, forKey: .wakeEnabled) ?? (os != .other)
+        sshEnabled = try c.decodeIfPresent(Bool.self, forKey: .sshEnabled) ?? true
+        vncEnabled = try c.decodeIfPresent(Bool.self, forKey: .vncEnabled) ?? true
+        vncPort = try c.decodeIfPresent(Int.self, forKey: .vncPort)
     }
 }
 
-// down: no ping reply. pingOnly: ping replies, but the service port does not answer. ready: the port is open.
+enum Service: String, Codable, Hashable {
+    case ssh, rdp, vnc
+
+    var label: String {
+        switch self {
+        case .ssh: return "SSH"
+        case .rdp: return "RDP"
+        case .vnc: return "Screen Sharing"
+        }
+    }
+    // The tag for the log.
+    var tag: String { self == .vnc ? "VNC" : label }
+    var defaultPort: Int {
+        switch self {
+        case .ssh: return 22
+        case .rdp: return 3389
+        case .vnc: return 5900
+        }
+    }
+    // The label of the button that connects to the service.
+    var action: String {
+        switch self {
+        case .ssh: return "Connect"
+        case .rdp: return "Open RDP App"
+        case .vnc: return "Open Screen Sharing"
+        }
+    }
+}
+
+// down: no ping reply. pingOnly: ping replies, but not all the service ports answer. ready: all the ports are open.
 enum Status { case unknown, down, pingOnly, ready }
 
 enum WakeError: LocalizedError {
@@ -150,8 +204,10 @@ enum Net {
     }
 
     // Open a TCP connection. With no payload, return empty data when the connection opens.
-    // With a payload, send it and return the first reply. Return nil on failure or timeout.
-    static func tcp(_ host: String, port: Int, send payload: Data? = nil, timeout: Double = 3) async -> Data? {
+    // With a payload, send it and return the first reply. With receive and no payload, return the first data
+    // that the server sends. Return nil on failure or timeout.
+    static func tcp(_ host: String, port: Int, send payload: Data? = nil, receive: Bool = false,
+                    timeout: Double = 3) async -> Data? {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { return nil }
         let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
         return await withCheckedContinuation { cont in
@@ -165,10 +221,13 @@ enum Net {
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    guard let payload else { return finish(Data()) }
+                    let read = {
+                        conn.receive(minimumIncompleteLength: 4, maximumLength: 1024) { data, _, _, _ in finish(data) }
+                    }
+                    guard let payload else { return receive ? read() : finish(Data()) }
                     conn.send(content: payload, completion: .contentProcessed { error in
                         if error != nil { return finish(nil) }
-                        conn.receive(minimumIncompleteLength: 6, maximumLength: 1024) { data, _, _, _ in finish(data) }
+                        read()
                     })
                 case .failed, .waiting:
                     finish(nil)
@@ -203,13 +262,19 @@ enum Net {
         return bytes.count >= 6 && bytes[0] == 0x03 && bytes[5] == 0xD0
     }
 
+    // True if the server sends an RFB banner, for example "RFB 003.889". This proves a VNC service.
+    static func rfbBanner(_ host: String, port: Int) async -> Bool {
+        guard let reply = await tcp(host, port: port, receive: true, timeout: 5) else { return false }
+        return reply.starts(with: Data("RFB ".utf8))
+    }
+
     // Log in with the host's SSH key. BatchMode stops ssh from asking for a password.
     // The test passes when ssh reports "Authenticated to", so it does not depend on a remote command:
-    // RouterOS has no shell. Linux hosts run "exit 0". Other hosts get no command, and ssh stops on success.
+    // RouterOS has no shell. Linux and macOS hosts run "exit 0". Other hosts get no command, and ssh stops on success.
     static func sshLogin(_ host: Host) async -> (ok: Bool, message: String) {
         var args = ["-v", "-T", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
                     "-o", "IdentitiesOnly=yes", "-i", host.sshKeyPath, "-p", String(host.servicePort), host.sshTarget]
-        if host.os == .linux { args.append("exit 0") }
+        if host.os == .linux || host.os == .macos { args.append("exit 0") }
 
         return await withCheckedContinuation { cont in
             let p = Process()
@@ -278,10 +343,12 @@ final class Store: ObservableObject {
     @AppStorage("timeout") var timeout = 180
 
     @Published var status: [UUID: Status] = [:]
+    // The services whose port answered at the last check.
+    @Published var open: [UUID: Set<Service>] = [:]
     @Published var lastChecked: Date?
     @Published var log: [UUID: [String]] = [:]
-    // Hosts whose last Wake or Test run failed. The next run clears the mark. The status poll does not.
-    @Published var failed: Set<UUID> = []
+    // The services that failed in the last Wake or Test run. The next run clears them. The status poll does not.
+    @Published var failed: [UUID: Set<Service>] = [:]
     @Published private var runs: [UUID: UUID] = [:]
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var poller: Task<Void, Never>?
@@ -323,33 +390,46 @@ final class Store: ObservableObject {
     // Ping first. Test the service port only if the ping replies.
     // A host is online if it replies to ping. A wake packet has no use for an online host.
     func isOnline(_ id: UUID) -> Bool { status[id] == .ready || status[id] == .pingOnly }
-    // A host is ready to connect if its port is open, no run is busy, and the last run did not fail.
-    func isReady(_ id: UUID) -> Bool { status[id] == .ready && !isBusy(id) && !failed.contains(id) }
-
-    // Why Connect or Open RDP App is not available. Nil if the host is ready.
-    func notReadyReason(_ h: Host) -> String? {
+    // Why the button for a service is not available. Nil if you can connect: the host replies to ping,
+    // the service port answers, no run is busy, and the service did not fail in the last run.
+    func notReadyReason(_ h: Host, _ s: Service) -> String? {
         if h.address.isEmpty { return "No address set" }
         if isBusy(h.id) { return "Wait for the run to finish" }
         switch status[h.id] {
         case .down: return "Host is down"
-        case .pingOnly: return "Host is up, but port \(h.servicePort) is not answering"
-        case .ready: return failed.contains(h.id) ? "The last test failed" : nil
+        case .pingOnly, .ready:
+            if !(open[h.id] ?? []).contains(s) { return "Host is up, but \(s.label) port \(h.port(s)) is not answering" }
+            if (failed[h.id] ?? []).contains(s) { return "The last \(s.label) test failed" }
+            return nil
         default: return "Checking the host"
         }
     }
 
-    private static func probe(_ h: Host) async -> Status {
-        guard await Net.ping(h.address) else { return .down }
-        return await Net.portOpen(h.address, port: h.servicePort) ? .ready : .pingOnly
+    // Ready if all the services answer, pingOnly if some do not.
+    private static func status(_ h: Host, open: Set<Service>) -> Status {
+        h.services.allSatisfy(open.contains) ? .ready : .pingOnly
+    }
+
+    private static func probe(_ h: Host) async -> (Status, Set<Service>) {
+        guard await Net.ping(h.address) else { return (.down, []) }
+        var open = Set<Service>()
+        for s in h.services {
+            if await Net.portOpen(h.address, port: h.port(s)) { open.insert(s) }
+        }
+        return (status(h, open: open), open)
     }
 
     func refreshStatus() async {
-        await withTaskGroup(of: (UUID, Status).self) { group in
+        await withTaskGroup(of: (UUID, Status, Set<Service>).self) { group in
             for h in hosts where !h.address.isEmpty {
-                group.addTask { (h.id, await Self.probe(h)) }
+                group.addTask {
+                    let (s, o) = await Self.probe(h)
+                    return (h.id, s, o)
+                }
             }
-            for await (id, s) in group where !isBusy(id) {
+            for await (id, s, o) in group where !isBusy(id) {
                 status[id] = s
+                open[id] = o
             }
         }
         lastChecked = Date()
@@ -359,10 +439,14 @@ final class Store: ObservableObject {
     func check(_ id: UUID) async {
         guard let h = hosts.first(where: { $0.id == id }), !h.address.isEmpty else {
             status[id] = nil
+            open[id] = nil
             return
         }
-        let s = await Self.probe(h)
-        if !isBusy(id) { status[id] = s }
+        let (s, o) = await Self.probe(h)
+        if !isBusy(id) {
+            status[id] = s
+            open[id] = o
+        }
     }
 
     private func append(_ id: UUID, _ tag: String, _ text: String) {
@@ -387,7 +471,7 @@ final class Store: ObservableObject {
         let run = UUID()
         runs[host.id] = run
         log[host.id] = []
-        failed.remove(host.id)
+        failed[host.id] = nil
 
         tasks[host.id] = Task {
             defer {
@@ -398,7 +482,6 @@ final class Store: ObservableObject {
             }
             let id = host.id
             let addr = host.address
-            let svc = host.os.service
 
             if wake {
                 append(id, "START", "Sending wake packet to \(host.mac) via \(broadcast):\(port)")
@@ -415,11 +498,11 @@ final class Store: ObservableObject {
             }
 
             let deadline = Date().addingTimeInterval(wake ? TimeInterval(timeout) : 0)
-            let fail = { (stage: String, what: String) in
+            let fail = { (stage: String, what: String, services: [Service]) in
                 if Task.isCancelled {
                     self.append(id, "CANCEL", "Stopped")
                 } else {
-                    self.failed.insert(id)
+                    self.failed[id, default: []].formUnion(services)
                     self.append(id, stage, wake ? "\(what) after \(self.timeout) seconds" : what)
                 }
             }
@@ -427,52 +510,73 @@ final class Store: ObservableObject {
             append(id, "PING", wake ? "Waiting for \(host.name) to respond at \(addr)" : "Testing \(addr)")
             guard await waitUntil(deadline, { await Net.ping(addr) }) else {
                 status[id] = .down
-                return fail("PING", "No reply to ping")
+                open[id] = []
+                return fail("PING", "No reply to ping", host.services)
             }
             status[id] = .pingOnly
+            open[id] = []
             append(id, "PING", "\(host.name) responds to ping")
 
-            append(id, svc, "Waiting for \(svc) on port \(host.servicePort)")
-            guard await waitUntil(deadline, { await Net.portOpen(addr, port: host.servicePort) }) else {
-                return fail(svc, "Port \(host.servicePort) is not answering")
-            }
-            status[id] = .ready
-            append(id, svc, "Port \(host.servicePort) is open")
-
-            switch host.os {
-            case .windows:
-                if await Net.rdpHandshake(addr, port: host.servicePort) {
-                    append(id, "RDP", "The RDP service accepted the connection request")
-                } else {
-                    failed.insert(id)
-                    append(id, "RDP", "Port is open, but no RDP handshake reply")
-                    return
+            // Test each service. A failed service does not stop the test of the next one.
+            for svc in host.services {
+                let p = host.port(svc)
+                append(id, svc.tag, "Waiting for \(svc.label) on port \(p)")
+                guard await waitUntil(deadline, { await Net.portOpen(addr, port: p) }) else {
+                    fail(svc.tag, "Port \(p) is not answering", [svc])
+                    if Task.isCancelled { return }
+                    continue
                 }
-            case .linux, .other:
-                if host.sshKey.isEmpty {
-                    append(id, "LOGIN", "No SSH key set, so no login test")
-                } else if host.sshKeyMissing {
-                    failed.insert(id)
-                    append(id, "LOGIN", "Key file not found: \(host.sshKeyPath)")
-                    return
-                } else {
-                    append(id, "LOGIN", "Logging in as \(host.sshTarget) with \(host.sshKey)")
-                    let result = await Net.sshLogin(host)
-                    guard result.ok else {
-                        failed.insert(id)
-                        append(id, "LOGIN", "Failed: \(result.message)")
-                        return
+                open[id, default: []].insert(svc)
+                status[id] = Self.status(host, open: open[id] ?? [])
+                append(id, svc.tag, "Port \(p) is open")
+
+                switch svc {
+                case .rdp:
+                    if await Net.rdpHandshake(addr, port: p) {
+                        append(id, "RDP", "The RDP service accepted the connection request")
+                    } else {
+                        failed[id, default: []].insert(svc)
+                        append(id, "RDP", "Port is open, but no RDP handshake reply")
                     }
-                    append(id, "LOGIN", "Login succeeded")
+                case .vnc:
+                    if await Net.rfbBanner(addr, port: p) {
+                        append(id, "VNC", "The Screen Sharing service sent its RFB banner")
+                    } else {
+                        failed[id, default: []].insert(svc)
+                        append(id, "VNC", "Port is open, but no RFB banner")
+                    }
+                case .ssh:
+                    if host.sshKey.isEmpty {
+                        append(id, "LOGIN", "No SSH key set, so no login test")
+                    } else if host.sshKeyMissing {
+                        failed[id, default: []].insert(svc)
+                        append(id, "LOGIN", "Key file not found: \(host.sshKeyPath)")
+                    } else {
+                        append(id, "LOGIN", "Logging in as \(host.sshTarget) with \(host.sshKey)")
+                        let result = await Net.sshLogin(host)
+                        if result.ok {
+                            append(id, "LOGIN", "Login succeeded")
+                        } else {
+                            failed[id, default: []].insert(svc)
+                            append(id, "LOGIN", "Failed: \(result.message)")
+                        }
+                    }
                 }
+                if Task.isCancelled { return append(id, "CANCEL", "Stopped") }
             }
 
-            append(id, "READY", host.os == .windows
-                   ? "\(host.name) is ready for RDP connections on port \(host.servicePort)"
-                   : "\(host.name) is ready")
-            NSSound(named: "Glass")?.play()
-            if connect && host.os.usesSSH {
-                openSSH(host)
+            let bad = failed[id] ?? []
+            if bad.isEmpty {
+                switch host.os {
+                case .windows: append(id, "READY", "\(host.name) is ready for RDP connections on port \(host.servicePort)")
+                case .macos: append(id, "READY", "\(host.name) is ready for \(host.services.map(\.label).joined(separator: " and "))")
+                case .linux, .other: append(id, "READY", "\(host.name) is ready")
+                }
+                NSSound(named: "Glass")?.play()
+            }
+            // Connect if the chosen service passed, even if another service failed.
+            if connect, let svc = host.connectService, !bad.contains(svc), (open[id] ?? []).contains(svc) {
+                self.connect(host, svc)
             }
         }
     }
@@ -482,7 +586,24 @@ final class Store: ObservableObject {
     func delete(_ id: UUID) {
         cancel(id)
         hosts.removeAll { $0.id == id }
-        failed.remove(id)
+        failed[id] = nil
+        open[id] = nil
+    }
+
+    func connect(_ host: Host, _ s: Service) {
+        switch s {
+        case .ssh: openSSH(host)
+        case .rdp: chooseRDPApp(for: host)
+        case .vnc: openScreenSharing(host)
+        }
+    }
+
+    // Start the Screen Sharing app. As for RDP, HostDeck does not give it the host or any credentials.
+    func openScreenSharing(_ host: Host) {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ScreenSharing") else {
+            return append(host.id, "ERROR", "Cannot find the Screen Sharing app")
+        }
+        launchApp(app, for: host)
     }
 
     // Write a .command file and open it. Terminal runs it. This needs no Automation permission.
@@ -680,8 +801,9 @@ struct FieldRow<Control: View>: View {
 struct StatusLine: View {
     let host: Host
     let status: Status?
+    let open: Set<Service>
+    let failed: Set<Service>
     let busy: Bool
-    let failed: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -691,19 +813,25 @@ struct StatusLine: View {
     }
 
     private var text: String {
-        let svc = host.os.service
         if busy { return "Working" }
         if host.address.isEmpty { return "No address set" }
+        let services = host.services
+        let names = { (list: [Service]) in list.map(\.label).joined(separator: " and ") }
         switch status {
-        case .ready: return failed ? "Online, but the last test failed" : "Online: ready for \(svc)"
-        case .pingOnly: return "Online, but \(svc) port \(host.servicePort) is not answering"
+        case .ready:
+            let bad = services.filter(failed.contains)
+            return bad.isEmpty ? "Online: ready for \(names(services))" : "Online, but the last \(names(bad)) test failed"
+        case .pingOnly:
+            let closed = services.filter { !open.contains($0) }
+            let ports = closed.map { "\($0.label) port \(host.port($0))" }.joined(separator: " and ")
+            return "Online, but \(ports) \(closed.count == 1 ? "is" : "are") not answering"
         case .down: return "Offline"
         default: return "Checking"
         }
     }
 }
 
-// A small mark for the OS type: four panes for Windows, a penguin for Linux.
+// A small mark for the OS type: four panes for Windows, a penguin for Linux, a computer for macOS.
 struct OSIcon: View {
     let os: OSType
 
@@ -716,6 +844,10 @@ struct OSIcon: View {
                     .foregroundStyle(Color(red: 0.0, green: 0.47, blue: 0.84))
             case .linux:
                 TuxIcon().frame(width: 15, height: 17)
+            case .macos:
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
             case .other:
                 Image(systemName: "wifi.router.fill")
                     .font(.system(size: 13))
@@ -948,17 +1080,49 @@ struct HostDetail: View {
                             TextField("MAC address", text: host.mac, prompt: Text("00:11:22:33:44:55"))
                         }
                     }
-                    FieldRow("Address") { TextField("Address", text: host.address, prompt: Text("IP or hostname")) }
-                    FieldRow("\(h.os.service) port", divider: false) {
-                        TextField("Port", value: host.port, format: .number.grouping(.never),
-                                  prompt: Text(String(h.os.defaultPort)))
+                    FieldRow("Address", divider: h.os != .macos) {
+                        TextField("Address", text: host.address, prompt: Text("IP or hostname"))
+                    }
+                    if h.os != .macos {
+                        FieldRow("\(h.os.service) port", divider: false) {
+                            TextField("Port", value: host.port, format: .number.grouping(.never),
+                                      prompt: Text(String(h.os.defaultPort)))
+                        }
+                    }
+                }
+                if h.os == .macos {
+                    // Each service has a switch and a port. You cannot turn off the last service that is on.
+                    FieldCard {
+                        FieldRow("SSH") {
+                            Toggle("SSH", isOn: host.sshEnabled).toggleStyle(.switch)
+                                .disabled(h.sshEnabled && !h.vncEnabled)
+                        }
+                        if h.sshEnabled {
+                            FieldRow("SSH port") {
+                                TextField("SSH port", value: host.port, format: .number.grouping(.never),
+                                          prompt: Text(String(Service.ssh.defaultPort)))
+                            }
+                        }
+                        FieldRow("Screen Sharing", divider: h.vncEnabled) {
+                            Toggle("Screen Sharing", isOn: host.vncEnabled).toggleStyle(.switch)
+                                .disabled(h.vncEnabled && !h.sshEnabled)
+                        }
+                        if h.vncEnabled {
+                            FieldRow("Screen Sharing port", divider: false) {
+                                TextField("Screen Sharing port", value: host.vncPort, format: .number.grouping(.never),
+                                          prompt: Text(String(Service.vnc.defaultPort)))
+                            }
+                        }
                     }
                 }
                 if h.os.usesSSH {
+                    let keyRow = h.services.contains(.ssh)
                     FieldCard {
-                        FieldRow("User") { TextField("User", text: host.user, prompt: Text("optional")) }
-                        FieldRow("SSH key", divider: false, warning: h.sshKeyMissing ? "Key file not found." : nil) {
-                            TextField("SSH key", text: host.sshKey, prompt: Text("optional, for example ~/.ssh/id_ed25519"))
+                        FieldRow("User", divider: keyRow) { TextField("User", text: host.user, prompt: Text("optional")) }
+                        if keyRow {
+                            FieldRow("SSH key", divider: false, warning: h.sshKeyMissing ? "Key file not found." : nil) {
+                                TextField("SSH key", text: host.sshKey, prompt: Text("optional, for example ~/.ssh/id_ed25519"))
+                            }
                         }
                     }
                 }
@@ -979,6 +1143,16 @@ struct HostDetail: View {
                     .padding(8)
                 }
                 .background(.background.secondary, in: RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topTrailing) {
+                    Button { store.log[id] = [] } label: {
+                        Image(systemName: "trash").font(.system(size: 13))
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("k", modifiers: .command)
+                    .disabled(busy || (store.log[id] ?? []).isEmpty)
+                    .help("Clear the log (⌘K)")
+                    .padding(8)
+                }
                 .onChange(of: store.log[id]?.count) { _, n in
                     if let n, n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
                 }
@@ -1002,7 +1176,7 @@ struct HostDetail: View {
                             .disabled(!h.macIsValid || store.isOnline(id))
                             .buttonStyle(ActionButtonStyle(color: .green))
                     }
-                    if h.os.usesSSH && h.canWake {
+                    if h.canWake && h.connectService != nil {
                         Button("Wake and Connect") { store.run(h, wake: true, connect: true) }
                             .keyboardShortcut(.return, modifiers: [.command, .shift])
                             .disabled(!h.macIsValid || h.address.isEmpty || store.isOnline(id))
@@ -1013,31 +1187,34 @@ struct HostDetail: View {
                         .disabled(h.address.isEmpty)
                         .buttonStyle(ActionButtonStyle(color: .blue))
                 }
-                StatusLine(host: h, status: store.status[id], busy: busy, failed: store.failed.contains(id))
+                StatusLine(host: h, status: store.status[id], open: store.open[id] ?? [],
+                           failed: store.failed[id] ?? [], busy: busy)
                     .padding(.leading, 8)
                 Spacer()
-                Button(h.os.usesSSH ? "Connect" : "Open RDP App") {
-                    if h.os.usesSSH { store.openSSH(h) } else { store.chooseRDPApp(for: h) }
-                }
-                .disabled(h.address.isEmpty || !store.isReady(id))
-                .buttonStyle(ActionButtonStyle(color: .blue))
-                // macOS shows no tooltip on a disabled button, so a near-clear layer on top of it carries the tooltip.
-                .overlay {
-                    if let reason = store.notReadyReason(h) {
-                        Color.white.opacity(0.001).help(reason)
-                    }
+                ForEach(h.services, id: \.self) { svc in
+                    let reason = store.notReadyReason(h, svc)
+                    Button(svc.action) { store.connect(h, svc) }
+                        .disabled(reason != nil)
+                        .buttonStyle(ActionButtonStyle(color: .blue))
+                        // macOS shows no tooltip on a disabled button, so a near-clear layer on top of it carries the tooltip.
+                        .overlay {
+                            if let reason {
+                                Color.white.opacity(0.001).help(reason)
+                            }
+                        }
                 }
             }
             .padding([.horizontal, .bottom])
         }
         .navigationTitle("HostDeck")
         .navigationSubtitle(h.name)
-        .task(id: "\(id) \(h.address) \(h.servicePort)") { await store.check(id) }
+        .task(id: "\(id) \(h.address) \(h.services.map { h.port($0) })") { await store.check(id) }
     }
 
     private func footer(_ os: OSType) -> String {
         switch os {
         case .linux: return "With an SSH key, the test logs in over SSH. HostDeck does not store passwords."
+        case .macos: return "With an SSH key, the test logs in over SSH. Open Screen Sharing starts the Screen Sharing app."
         case .windows: return "The test checks for an RDP handshake. Open RDP App starts the RDP app that you choose."
         case .other: return "With an SSH key, the test logs in over SSH. Turn on Wake-on-LAN only if the device supports it."
         }
@@ -1055,20 +1232,22 @@ struct MenuContent: View {
                     Button("Wake") { store.run(host, wake: true, connect: false) }
                         .disabled(!host.macIsValid || store.isOnline(host.id))
                 }
-                if host.os.usesSSH && host.canWake {
+                if host.canWake && host.connectService != nil {
                     Button("Wake and Connect") { store.run(host, wake: true, connect: true) }
                         .disabled(!host.macIsValid || host.address.isEmpty || store.isOnline(host.id))
                 }
-                if host.os.usesSSH {
-                    Button("Connect") { store.openSSH(host) }
-                        .disabled(host.address.isEmpty || !store.isReady(host.id))
-                } else {
-                    Menu("Open RDP App") {
-                        ForEach(store.rdpApps(), id: \.self) { app in
-                            Button(store.appName(app)) { store.launchApp(app, for: host) }
+                ForEach(host.services, id: \.self) { svc in
+                    if svc == .rdp {
+                        Menu("Open RDP App") {
+                            ForEach(store.rdpApps(), id: \.self) { app in
+                                Button(store.appName(app)) { store.launchApp(app, for: host) }
+                            }
                         }
+                        .disabled(store.notReadyReason(host, svc) != nil)
+                    } else {
+                        Button(svc.action) { store.connect(host, svc) }
+                            .disabled(store.notReadyReason(host, svc) != nil)
                     }
-                    .disabled(host.address.isEmpty || !store.isReady(host.id))
                 }
             } label: {
                 Text(label(host))
