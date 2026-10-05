@@ -960,7 +960,7 @@ struct StatusLine: View {
     }
 }
 
-// A small mark for the OS type: four panes for Windows, a penguin for Linux, a computer for macOS.
+// A small mark for the OS type: four panes for Windows, a penguin for Linux, an apple for macOS.
 struct OSIcon: View {
     let os: OSType
 
@@ -974,7 +974,7 @@ struct OSIcon: View {
             case .linux:
                 TuxIcon().frame(width: 15, height: 17)
             case .macos:
-                Image(systemName: "desktopcomputer")
+                Image(systemName: "apple.logo")
                     .font(.system(size: 13))
                     .foregroundStyle(.primary)
             case .other:
