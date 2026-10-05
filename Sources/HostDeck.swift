@@ -280,6 +280,8 @@ final class Store: ObservableObject {
     @Published var status: [UUID: Status] = [:]
     @Published var lastChecked: Date?
     @Published var log: [UUID: [String]] = [:]
+    // Hosts whose last Wake or Test run failed. The next run clears the mark. The status poll does not.
+    @Published var failed: Set<UUID> = []
     @Published private var runs: [UUID: UUID] = [:]
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var poller: Task<Void, Never>?
@@ -321,6 +323,20 @@ final class Store: ObservableObject {
     // Ping first. Test the service port only if the ping replies.
     // A host is online if it replies to ping. A wake packet has no use for an online host.
     func isOnline(_ id: UUID) -> Bool { status[id] == .ready || status[id] == .pingOnly }
+    // A host is ready to connect if its port is open, no run is busy, and the last run did not fail.
+    func isReady(_ id: UUID) -> Bool { status[id] == .ready && !isBusy(id) && !failed.contains(id) }
+
+    // Why Connect or Open RDP App is not available. Nil if the host is ready.
+    func notReadyReason(_ h: Host) -> String? {
+        if h.address.isEmpty { return "No address set" }
+        if isBusy(h.id) { return "Wait for the run to finish" }
+        switch status[h.id] {
+        case .down: return "Host is down"
+        case .pingOnly: return "Host is up, but port \(h.servicePort) is not answering"
+        case .ready: return failed.contains(h.id) ? "The last test failed" : nil
+        default: return "Checking the host"
+        }
+    }
 
     private static func probe(_ h: Host) async -> Status {
         guard await Net.ping(h.address) else { return .down }
@@ -371,6 +387,7 @@ final class Store: ObservableObject {
         let run = UUID()
         runs[host.id] = run
         log[host.id] = []
+        failed.remove(host.id)
 
         tasks[host.id] = Task {
             defer {
@@ -402,6 +419,7 @@ final class Store: ObservableObject {
                 if Task.isCancelled {
                     self.append(id, "CANCEL", "Stopped")
                 } else {
+                    self.failed.insert(id)
                     self.append(id, stage, wake ? "\(what) after \(self.timeout) seconds" : what)
                 }
             }
@@ -426,18 +444,22 @@ final class Store: ObservableObject {
                 if await Net.rdpHandshake(addr, port: host.servicePort) {
                     append(id, "RDP", "The RDP service accepted the connection request")
                 } else {
+                    failed.insert(id)
                     append(id, "RDP", "Port is open, but no RDP handshake reply")
+                    return
                 }
             case .linux, .other:
                 if host.sshKey.isEmpty {
                     append(id, "LOGIN", "No SSH key set, so no login test")
                 } else if host.sshKeyMissing {
+                    failed.insert(id)
                     append(id, "LOGIN", "Key file not found: \(host.sshKeyPath)")
                     return
                 } else {
                     append(id, "LOGIN", "Logging in as \(host.sshTarget) with \(host.sshKey)")
                     let result = await Net.sshLogin(host)
                     guard result.ok else {
+                        failed.insert(id)
                         append(id, "LOGIN", "Failed: \(result.message)")
                         return
                     }
@@ -460,6 +482,7 @@ final class Store: ObservableObject {
     func delete(_ id: UUID) {
         cancel(id)
         hosts.removeAll { $0.id == id }
+        failed.remove(id)
     }
 
     // Write a .command file and open it. Terminal runs it. This needs no Automation permission.
@@ -563,6 +586,11 @@ final class Store: ObservableObject {
 struct HostDeckApp: App {
     @StateObject private var store = Store()
 
+    init() {
+        // Show tooltips after 0.2 seconds, not the macOS default of about 1 second. This applies to HostDeck only.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 200])
+    }
+
     var body: some Scene {
         WindowGroup("HostDeck", id: "main") {
             ContentView().environmentObject(store)
@@ -653,6 +681,7 @@ struct StatusLine: View {
     let host: Host
     let status: Status?
     let busy: Bool
+    let failed: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -666,7 +695,7 @@ struct StatusLine: View {
         if busy { return "Working" }
         if host.address.isEmpty { return "No address set" }
         switch status {
-        case .ready: return "Online: ready for \(svc)"
+        case .ready: return failed ? "Online, but the last test failed" : "Online: ready for \(svc)"
         case .pingOnly: return "Online, but \(svc) port \(host.servicePort) is not answering"
         case .down: return "Offline"
         default: return "Checking"
@@ -984,14 +1013,20 @@ struct HostDetail: View {
                         .disabled(h.address.isEmpty)
                         .buttonStyle(ActionButtonStyle(color: .blue))
                 }
-                StatusLine(host: h, status: store.status[id], busy: busy)
+                StatusLine(host: h, status: store.status[id], busy: busy, failed: store.failed.contains(id))
                     .padding(.leading, 8)
                 Spacer()
                 Button(h.os.usesSSH ? "Connect" : "Open RDP App") {
                     if h.os.usesSSH { store.openSSH(h) } else { store.chooseRDPApp(for: h) }
                 }
-                .disabled(h.os.usesSSH && h.address.isEmpty)
+                .disabled(h.address.isEmpty || !store.isReady(id))
                 .buttonStyle(ActionButtonStyle(color: .blue))
+                // macOS shows no tooltip on a disabled button, so a near-clear layer on top of it carries the tooltip.
+                .overlay {
+                    if let reason = store.notReadyReason(h) {
+                        Color.white.opacity(0.001).help(reason)
+                    }
+                }
             }
             .padding([.horizontal, .bottom])
         }
@@ -1026,13 +1061,14 @@ struct MenuContent: View {
                 }
                 if host.os.usesSSH {
                     Button("Connect") { store.openSSH(host) }
-                        .disabled(host.address.isEmpty)
+                        .disabled(host.address.isEmpty || !store.isReady(host.id))
                 } else {
                     Menu("Open RDP App") {
                         ForEach(store.rdpApps(), id: \.self) { app in
                             Button(store.appName(app)) { store.launchApp(app, for: host) }
                         }
                     }
+                    .disabled(host.address.isEmpty || !store.isReady(host.id))
                 }
             } label: {
                 Text(label(host))

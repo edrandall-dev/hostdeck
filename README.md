@@ -68,8 +68,8 @@ Remote Desktop must also be on (Settings > System > Remote Desktop).
 | Wake | ⌘↩ | Send the wake packet, then wait for each check to pass. |
 | Wake and Connect | ⇧⌘↩ | Linux and Other, when Wake-on-LAN is on. As Wake, then open an SSH session when the host is ready. |
 | Test | ⌘T | Do each check one time. The app sends no wake packet. |
-| Connect | | Linux and Other. Open an SSH session now. |
-| Open RDP App | | Windows only. Choose an RDP app, and HostDeck starts it. |
+| Connect | | Linux and Other, when the host is ready. Open an SSH session now. |
+| Open RDP App | | Windows only, when the host is ready. Choose an RDP app, and HostDeck starts it. |
 | Cancel | Esc | Stop the wait. |
 
 The server rack icon in the menu bar gives the same commands for each host when the main window is closed.
@@ -94,7 +94,7 @@ After a wake packet, the app repeats checks 1 and 2 until they pass or the timeo
 
 The app checks each host every 15 seconds, and also when you select a host. The list shows a status symbol for each host. Next to the buttons, the app shows the status of the selected host in words, for example "Online: ready for RDP".
 
-While a host is online (it replies to ping), you cannot click Wake or Wake and Connect, because the host is already awake. Test, Connect and Open RDP App stay available.
+While a host is online (it replies to ping), you cannot click Wake or Wake and Connect, because the host is already awake. Connect and Open RDP App are available only while the host is ready (it replies to ping and its service port is open). They are not available while a run is busy. If a Wake or Test run fails, for example at the RDP handshake or the SSH login, they stay unavailable until a later run passes. Test is always available, so you can check the host again. Hold the pointer over a faded Connect or Open RDP App button to see why it is not available.
 
 | Symbol | Meaning |
 | --- | --- |
