@@ -132,3 +132,8 @@ The bottom of the host list shows a key for these symbols, the number of hosts t
 | `Resources/Info.plist` | The bundle information, with the Local Network usage text. |
 | `Tools/make-icon.swift` | Draws the app icon. `build.sh` runs it. |
 | `build.sh` | Builds, signs and installs the app. |
+| `LICENSE` | The MIT License. |
+
+## Licence
+
+HostDeck is available under the [MIT License](LICENSE).
