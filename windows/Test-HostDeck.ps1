@@ -93,6 +93,18 @@ Assert 'one host is still an array' ((ConvertFrom-Json $single).hosts -is [array
 $m = Merge-HDHosts @($d.Hosts[0], $d.Hosts[1]) @($bare.Hosts[0], (New-HDHost 'new'))
 Assert 'merge replaces by id and adds the rest' ($m.Added -eq 1 -and $m.Replaced -eq 1 -and $m.List.Count -eq 3 -and $m.List[0].name -eq 'one')
 
+
+Write-Host 'Save'
+# Save twice: the second save replaces the file. Each later save of the app does this.
+$saveDir = Join-Path ([IO.Path]::GetTempPath()) "hostdeck-save-$([guid]::NewGuid())"
+[void](New-Item -ItemType Directory -Path $saveDir)
+$saveFile = Join-Path $saveDir 'hostdeck.json'
+Write-HDTextFile $saveFile (New-HDFileText @($d.Hosts[0]) @{ broadcast = '255.255.255.255'; port = 9; timeout = 180 })
+Write-HDTextFile $saveFile (New-HDFileText $d.Hosts @{ broadcast = '255.255.255.255'; port = 9; timeout = 180 })
+Assert 'a second save replaces the file' ((Read-HDFile ([IO.File]::ReadAllText($saveFile))).Hosts.Count -eq 5)
+Assert 'a save leaves no temporary file' (-not (Test-Path "$saveFile.tmp"))
+Assert 'a save writes no byte order mark' ([IO.File]::ReadAllBytes($saveFile)[0] -eq [byte][char]'{')
+Remove-Item -LiteralPath $saveDir -Recurse
 Write-Host 'Model'
 $h = New-HDHost 'test'
 Assert 'new host id is upper case' ($h.id -ceq $h.id.ToUpperInvariant())

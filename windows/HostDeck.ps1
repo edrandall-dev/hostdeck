@@ -587,7 +587,8 @@ function Merge-HDHosts($current, $incoming) {
 function Write-HDTextFile([string]$path, [string]$text) {
     $tmp = "$path.tmp"
     [IO.File]::WriteAllText($tmp, $text, [Text.UTF8Encoding]::new($false))
-    if ([IO.File]::Exists($path)) { [IO.File]::Replace($tmp, $path, $null) } else { [IO.File]::Move($tmp, $path) }
+    # PowerShell passes $null to a string parameter as "", and Replace rejects "" as a path. [NullString] is a real null.
+    if ([IO.File]::Exists($path)) { [IO.File]::Replace($tmp, $path, [NullString]::Value) } else { [IO.File]::Move($tmp, $path) }
 }
 
 # MARK: - Icons
@@ -1111,10 +1112,20 @@ function Get-HDSelected { if ($script:SelectedId) { Find-HDHost $script:Selected
 
 function Test-HDOnline([string]$id) { (Get-HDState $id).Status -in 'ready', 'pingOnly' }
 
+$script:LastError = $null
+
+# Write an error to errors.log. A timer can raise the same error many times a second, so skip a repeat.
+# When the log is larger than 1 MB, start a new one and keep the old one as errors.old.log.
 function Write-HDError($err) {
     try {
-        $line = "$(Get-Date -Format s)  $err $($err.ScriptStackTrace)"
-        [IO.File]::AppendAllText((Join-Path $DataDir 'errors.log'), $line + [Environment]::NewLine)
+        $text = "$err $($err.ScriptStackTrace)"
+        if ($text -eq $script:LastError) { return }
+        $script:LastError = $text
+        $file = Join-Path $DataDir 'errors.log'
+        if ([IO.File]::Exists($file) -and ([IO.FileInfo]::new($file)).Length -gt 1MB) {
+            Move-Item -LiteralPath $file -Destination (Join-Path $DataDir 'errors.old.log') -Force
+        }
+        [IO.File]::AppendAllText($file, "$(Get-Date -Format s)  $text" + [Environment]::NewLine)
     } catch { }
 }
 
@@ -1148,6 +1159,22 @@ function Save-HDStore {
 }
 
 function Set-HDDirty { $script:DirtyAt = Get-Date }
+
+# Save, and keep the app working if the save fails. Try again after 10 seconds, and tell the user one time.
+$script:SaveFailed = $false
+function Save-HDStoreSafely {
+    try {
+        Save-HDStore
+        $script:SaveFailed = $false
+    } catch {
+        Write-HDError $_
+        $script:DirtyAt = (Get-Date).AddSeconds(10)
+        if (-not $script:SaveFailed) {
+            $script:SaveFailed = $true
+            Show-HDMessage 'Cannot save the hosts' "HostDeck cannot save to $(Get-HDDataFile): $($_.Exception.Message) It tries again every 10 seconds. To keep a copy now, use File > Export Hosts." 'Warning'
+        }
+    }
+}
 
 # MARK: - Background jobs
 
@@ -2074,10 +2101,11 @@ $script:Pump.Add_Tick({
                 if ($h) { Start-HDProbe $h; $changed = $true }
             }
         }
-        if ($script:DirtyAt -and ($now - $script:DirtyAt).TotalMilliseconds -gt 500) { Save-HDStore }
         if ($script:ShowEvent.WaitOne(0)) { Show-HDWindow }
-        if ($changed) { Update-HDView }
     } catch { Write-HDError $_ }
+    # Update the window even if a step above failed, so that the log and the status never stop.
+    try { if ($changed) { Update-HDView } } catch { Write-HDError $_ }
+    if ($script:DirtyAt -and ((Get-Date) - $script:DirtyAt).TotalMilliseconds -gt 500) { Save-HDStoreSafely }
 })
 
 # Check each host every 15 seconds.
