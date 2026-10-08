@@ -4,6 +4,8 @@ HostDeck checks, wakes and connects to the hosts on your network. It sends Wake-
 
 On the first start, HostDeck copies the hosts and settings of the old Wake app.
 
+A Windows version is in [windows/](windows/README.md). It has the same checks and reads and writes the same file format, so you can move your hosts between a Mac and a PC with File > Export Hosts and File > Import Hosts.
+
 ## Requirements
 
 - macOS 14 (Sonoma) or later, on Apple silicon or Intel.
@@ -192,7 +194,8 @@ To remove the certificate, delete "HostDeck Local Signing" from the login keycha
 | `Tools/make-signing-cert.sh` | Makes the signing certificate. Run it one time on each Mac. |
 | `build.sh` | Builds, signs and installs the app. It signs with the certificate if there is one, else ad hoc. |
 | `docs/FILE-FORMAT.md` | The JSON format of the saved hosts and of the export file. |
-| `CLAUDE.md` | Notes for Claude Code, with the plan for a Windows version. |
+| `windows/` | HostDeck for Windows. [windows/README.md](windows/README.md) describes it. |
+| `CLAUDE.md` | Notes for Claude Code, with the rules for the two versions. |
 | `LICENSE` | The MIT License. |
 
 ## Licence
