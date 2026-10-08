@@ -1,6 +1,6 @@
 # HostDeck hosts file format
 
-This document defines the JSON file that File > Export Hosts writes and File > Import Hosts reads. The macOS app keeps its saved hosts in the same `Host` format. Every version of HostDeck, on any platform, must read and write this format.
+This document defines the JSON file that File > Export Hosts writes and File > Import Hosts reads. The macOS app keeps its saved hosts in the same `Host` format. The Windows app keeps its hosts and settings in `%APPDATA%HostDeckhostdeck.json`, as a complete export file. Every version of HostDeck, on any platform, must read and write this format.
 
 The current format version is 1.
 
@@ -84,7 +84,7 @@ Then:
 
 ## Change the format
 
-- Do not rename or remove a key in version 1. The macOS app pins the key names with explicit `CodingKeys` in `Sources/HostDeck.swift`.
+- Do not rename or remove a key in version 1. The macOS app pins the key names with explicit `CodingKeys` in `Sources/HostDeck.swift`. The Windows app writes them in `ConvertTo-HDHostRecord` in `windows/HostDeck.ps1`.
 - To add an optional key, give it a default and add it to this document. The version stays 1.
 - For any other change, increase `version`. Keep the reader for the old version.
 
