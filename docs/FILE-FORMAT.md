@@ -7,7 +7,7 @@ The current format version is 1.
 ## Encoding
 
 - The file is UTF-8 JSON.
-- Dates are ISO 8601 strings in UTC, for example `2026-10-05T14:30:55Z`.
+- Dates are ISO 8601 strings in UTC, for example `2026-10-05T14:30:55Z`. A writer leaves out fractional seconds. A reader accepts them, for example `2026-10-05T14:30:55.1234567Z`, because some platforms write them by default.
 - IDs are UUID strings in upper case, for example `C10C8A0E-416A-4DFC-93AA-1DE87EC6C0D1`. Compare IDs without regard to case.
 - A writer leaves out an optional key that has no value. It does not write `null`. A reader accepts both.
 - A reader ignores keys that it does not know. This lets an older reader import a file from a newer writer.
@@ -64,6 +64,14 @@ All the keys are optional. An importer changes only the settings that the file c
 ## Import
 
 Import merges the file with the current list. It does not delete hosts.
+
+Before it merges, an importer checks the file. If a check fails, it imports nothing and tells the user why.
+
+- `app` is `"HostDeck"`.
+- `version` is a version that the importer reads. A file from a newer version can mean something different, so the importer does not guess.
+- No `address` or `user` starts with `-`. `ssh` and `ping` read such a value as an option, and an option such as `-oProxyCommand=` runs a command. An app must also pass `--` before the address when it runs these tools.
+
+Then:
 
 1. For each host in the file, find a host in the list with the same `id`.
 2. If there is one, replace it with the host from the file.

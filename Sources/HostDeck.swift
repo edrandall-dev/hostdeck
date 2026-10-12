@@ -88,6 +88,12 @@ struct Host: Identifiable, Codable, Hashable {
     var sshTarget: String { user.isEmpty ? address : "\(user)@\(address)" }
     var sshKeyPath: String { (sshKey as NSString).expandingTildeInPath }
     var sshKeyMissing: Bool { !sshKey.isEmpty && !FileManager.default.fileExists(atPath: sshKeyPath) }
+
+    // ssh and ping read a value that starts with "-" as an option, for example -oProxyCommand=,
+    // which runs a command. HostDeck passes "--" before the address, and also rejects these values.
+    var addressIsUnsafe: Bool { address.hasPrefix("-") }
+    var userIsUnsafe: Bool { user.hasPrefix("-") }
+    var hasUnsafeValue: Bool { addressIsUnsafe || userIsUnsafe }
 }
 
 
@@ -157,7 +163,7 @@ struct HostsFile: Codable {
         }
     }
     var app = "HostDeck"
-    var version = 1
+    var version = HostsFile.currentVersion
     var exported = Date()
     var hosts: [Host]
     var settings: Settings?
@@ -168,6 +174,21 @@ struct HostsFile: Codable {
         case exported = "exported"
         case hosts = "hosts"
         case settings = "settings"
+    }
+
+    // The format version that this reader knows.
+    static let currentVersion = 1
+
+    // Read an ISO 8601 date with or without fractional seconds. A writer on another platform can add them,
+    // for example .NET writes 2026-10-05T14:30:55.1234567Z.
+    static func decodeDate(_ decoder: Decoder) throws -> Date {
+        let c = try decoder.singleValueContainer()
+        let text = try c.decode(String.self)
+        let whole = text.replacingOccurrences(of: #"\.\d+"#, with: "", options: .regularExpression)
+        guard let date = ISO8601DateFormatter().date(from: whole) else {
+            throw DecodingError.dataCorruptedError(in: c, debugDescription: "Not an ISO 8601 date: \(text)")
+        }
+        return date
     }
 }
 
@@ -243,7 +264,8 @@ enum Net {
         await withCheckedContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/sbin/ping")
-            p.arguments = ["-c", "1", "-t", "1", "-q", host]
+            // "--" stops an address that starts with "-" from being read as an option.
+            p.arguments = ["-c", "1", "-t", "1", "-q", "--", host]
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
             p.terminationHandler = { cont.resume(returning: $0.terminationStatus == 0) }
@@ -320,8 +342,9 @@ enum Net {
     // The test passes when ssh reports "Authenticated to", so it does not depend on a remote command:
     // RouterOS has its own command line, not a Unix shell. Linux and macOS hosts run "exit 0". Other hosts get no command, and ssh stops on success.
     static func sshLogin(_ host: Host) async -> (ok: Bool, message: String) {
+        // "--" stops a target that starts with "-" from being read as an option.
         var args = ["-v", "-T", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
-                    "-o", "IdentitiesOnly=yes", "-i", host.sshKeyPath, "-p", String(host.servicePort), host.sshTarget]
+                    "-o", "IdentitiesOnly=yes", "-i", host.sshKeyPath, "-p", String(host.servicePort), "--", host.sshTarget]
         if host.os == .linux || host.os == .macos { args.append("exit 0") }
 
         return await withCheckedContinuation { cont in
@@ -544,6 +567,10 @@ final class Store: ObservableObject {
                 append(id, wake ? "DONE" : "ERROR", "Set an address to test \(host.name).")
                 return
             }
+            guard !host.hasUnsafeValue else {
+                append(id, "ERROR", "The address or user starts with \"-\". Change it to test \(host.name).")
+                return
+            }
 
             let deadline = Date().addingTimeInterval(wake ? TimeInterval(timeout) : 0)
             let fail = { (stage: String, what: String, services: [Service]) in
@@ -671,7 +698,7 @@ final class Store: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom(HostsFile.decodeDate)
         let file: HostsFile
         do {
             let data = try Data(contentsOf: url)
@@ -682,6 +709,21 @@ final class Store: ObservableObject {
             }
         } catch {
             return alert("Cannot import the hosts", "\(url.lastPathComponent) is not a HostDeck export.")
+        }
+        guard file.app == "HostDeck" else {
+            return alert("Cannot import the hosts", "\(url.lastPathComponent) is not a HostDeck export.")
+        }
+        // A file from a newer HostDeck can have a format that this version reads wrongly. Do not guess.
+        guard file.version == HostsFile.currentVersion else {
+            return alert("Cannot import the hosts",
+                         "\(url.lastPathComponent) uses format version \(file.version). "
+                         + "This version of HostDeck reads version \(HostsFile.currentVersion). Update HostDeck, then try again.")
+        }
+        let unsafe = file.hosts.filter(\.hasUnsafeValue).map(\.name)
+        guard unsafe.isEmpty else {
+            return alert("Cannot import the hosts",
+                         "The address or user of these hosts starts with \"-\", which ssh reads as an option: "
+                         + unsafe.joined(separator: ", ") + ". HostDeck imported no hosts.")
         }
 
         var list = hosts
@@ -734,13 +776,17 @@ final class Store: ObservableObject {
     static let terminalRows = 36
 
     func openSSH(_ host: Host) {
+        guard !host.hasUnsafeValue else {
+            return append(host.id, "ERROR", "The address or user starts with \"-\". Change it to connect.")
+        }
         append(host.id, "CONNECT", "Opening SSH session to \(host.sshTarget)")
         var parts = ["ssh"]
         if host.servicePort != 22 { parts += ["-p", String(host.servicePort)] }
         if !host.sshKey.isEmpty {
             parts += ["-i", quote(host.sshKeyPath)]
         }
-        parts.append(quote(host.sshTarget))
+        // Quotes do not stop ssh from reading a target that starts with "-" as an option. "--" does.
+        parts += ["--", quote(host.sshTarget)]
 
         let url = tempFile(host, ext: "command")
         // Before ssh starts, make this Terminal tab larger and its font larger.
@@ -1209,7 +1255,8 @@ struct HostDetail: View {
                             TextField("MAC address", text: host.mac, prompt: Text("00:11:22:33:44:55"))
                         }
                     }
-                    FieldRow("Address", divider: h.os != .macos) {
+                    FieldRow("Address", divider: h.os != .macos,
+                             warning: h.addressIsUnsafe ? "An address cannot start with \"-\"." : nil) {
                         TextField("Address", text: host.address, prompt: Text("IP or hostname"))
                     }
                     if h.os != .macos {
@@ -1247,7 +1294,9 @@ struct HostDetail: View {
                 if h.os.usesSSH {
                     let keyRow = h.services.contains(.ssh)
                     FieldCard {
-                        FieldRow("User", divider: keyRow) { TextField("User", text: host.user, prompt: Text("optional")) }
+                        FieldRow("User", divider: keyRow, warning: h.userIsUnsafe ? "A user cannot start with \"-\"." : nil) {
+                            TextField("User", text: host.user, prompt: Text("optional"))
+                        }
                         if keyRow {
                             FieldRow("SSH key", divider: false, warning: h.sshKeyMissing ? "Key file not found." : nil) {
                                 TextField("SSH key", text: host.sshKey, prompt: Text("optional, for example ~/.ssh/id_ed25519"))

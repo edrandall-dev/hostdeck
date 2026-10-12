@@ -30,6 +30,7 @@ These are the known points for that work:
 - The checks are ping, then a TCP connection to each service port, then a test for each service: X.224 Connection Confirm for RDP, an `RFB ` banner for Screen Sharing, and an SSH login with the key (`ssh -o BatchMode=yes`). The README gives the details.
 - The wake packet is the standard magic packet (6 bytes of 0xFF, then the MAC address 16 times), sent 5 times to the broadcast address. The default UDP port is 9. Settings can change the address and the port.
 - HostDeck stores no passwords. Keep it that way.
+- An imported file can come from anyone. Reject an `address` or `user` that starts with `-`, and pass `--` before the address to `ssh` and `ping`, so that a value cannot become an option such as `-oProxyCommand=`.
 
 ## Writing
 
