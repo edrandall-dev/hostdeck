@@ -39,7 +39,11 @@ EOF
 
 openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 -config "$TMP/cert.cnf" \
     -keyout "$TMP/key.pem" -out "$TMP/cert.pem" 2>/dev/null
+# OpenSSL 3 (for example from Homebrew) encrypts a .p12 file with AES and a SHA-256 MAC by default.
+# The security tool cannot read that and reports "MAC verification failed". So ask for SHA-1 and 3DES,
+# which the security tool reads. LibreSSL in macOS and OpenSSL 3 both accept these options.
 openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" -name "$NAME" \
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
     -passout "pass:$PASS" -out "$TMP/cert.p12"
 
 # -T lets codesign use the private key.

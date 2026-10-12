@@ -156,6 +156,8 @@ macOS gives the Local Network permission to an app by its signature. An ad hoc s
 
 With the certificate from `Tools/make-signing-cert.sh`, the signature names the bundle ID and the certificate, and it stays the same across rebuilds. You allow Local Network access one time, and the permission stays.
 
+The script works with the LibreSSL in macOS and with OpenSSL 3, for example from Homebrew. It makes the `.p12` file with SHA-1 and 3DES, because the `security` tool cannot read the AES format that OpenSSL 3 makes by default.
+
 `build.sh` uses the certificate if it is in the keychain, and signs ad hoc if it is not. To use a certificate with another name, set `HOSTDECK_SIGN_ID` for both scripts. To check the signature, run:
 
 ```sh
